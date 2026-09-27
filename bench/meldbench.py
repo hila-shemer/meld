@@ -417,6 +417,9 @@ def main():
 
     global SOURCE
     SOURCE = args.source.resolve()
+    if args.out:
+        # Relative to where we were started, not the tree under test
+        args.out = os.path.abspath(args.out)
     t_start = time.perf_counter()
     os.chdir(SOURCE)
     setup_meld()
