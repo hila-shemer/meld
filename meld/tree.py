@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import bisect
+import itertools
 import logging
 import os
 
@@ -81,6 +83,8 @@ class DiffTreeStore(SearchableTreeStore):
             for col_num, col_type in enumerate(full_types)
         }
         self.ntree = ntree
+        self._diff_paths = None
+        self._diff_paths_handlers = []
         self._setup_default_styles()
 
     def _setup_default_styles(self, style=None):
@@ -213,6 +217,33 @@ class DiffTreeStore(SearchableTreeStore):
             return None
 
     def _find_next_prev_diff(self, start_path):
+        try:
+            self.get_iter(start_path)
+        except ValueError:
+            # Invalid tree path
+            return None, None
+
+        # Tree order is the lexicographic order of path indices, so the
+        # neighbouring differences are found by bisecting the sorted list.
+        diff_paths = self._get_diff_paths()
+        start = tuple(start_path.get_indices())
+        before = bisect.bisect_left(diff_paths, start)
+        after = bisect.bisect_right(diff_paths, start)
+        prev_path = Gtk.TreePath(diff_paths[before - 1]) if before else None
+        next_path = Gtk.TreePath(diff_paths[after]) if after < len(diff_paths) else None
+        return prev_path, next_path
+
+    def _get_diff_paths(self):
+        """Get the paths of all differing rows, in tree order
+
+        Walking a big tree from Python is slow enough to stall the UI, so
+        the list is kept until the model next changes. The invalidation
+        handlers are only connected while there is a list to invalidate,
+        so that bulk updates such as a folder scan don't pay for them.
+        """
+        if self._diff_paths is not None:
+            return self._diff_paths
+
         def match_func(it):
             # TODO: It works, but matching on the first pane only is very poor
             return self.get_state(it, 0) not in (
@@ -221,7 +252,30 @@ class DiffTreeStore(SearchableTreeStore):
                 STATE_EMPTY,
             )
 
-        return self.get_previous_next_paths(start_path, match_func)
+        diff_paths = []
+        root = self.get_iter_first()
+        if root:
+            for it in itertools.chain([root], self.inorder_search_down(root)):
+                if match_func(it):
+                    diff_paths.append(tuple(self.get_path(it).get_indices()))
+
+        self._diff_paths = diff_paths
+        self._diff_paths_handlers = [
+            self.connect(signal, self._invalidate_diff_paths)
+            for signal in (
+                "row-changed",
+                "row-deleted",
+                "row-inserted",
+                "rows-reordered",
+            )
+        ]
+        return diff_paths
+
+    def _invalidate_diff_paths(self, *args):
+        self._diff_paths = None
+        for handler_id in self._diff_paths_handlers:
+            self.disconnect(handler_id)
+        self._diff_paths_handlers = []
 
     def state_rows(self, states):
         """Generator of rows in one of the given states
