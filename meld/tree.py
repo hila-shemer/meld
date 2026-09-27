@@ -133,6 +133,13 @@ class DiffTreeStore(SearchableTreeStore):
 
         assert len(self.icon_details) == len(self.text_attributes) == STATE_MAX
 
+    def clear(self):
+        # Gtk.TreeStore.clear() removes rows leaf-first, so every row in the
+        # tree is a row-deleted for each view and handler. Removing just the
+        # top-level rows drops each whole subtree in a single emission.
+        while (it := self.get_iter_first()) is not None:
+            self.remove(it)
+
     def iter_is_root(self, it: Gtk.TreeIter) -> bool:
         return self.iter_parent(it) is None
 
