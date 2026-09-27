@@ -23,6 +23,7 @@ import os
 import shutil
 import stat
 import sys
+import time
 import typing
 import unicodedata
 from collections import namedtuple
@@ -258,6 +259,10 @@ def _files_same(files, regexes, comparison_args):
     _cache[cache_key] = CacheResult(stats, result)
     return result
 
+
+# How long one step of a folder scan may run before handing control back
+# to the main loop. Big folders are scanned over several steps.
+SCAN_SLICE_SECONDS = 0.02
 
 EMBLEM_NEW = "emblem-new"
 EMBLEM_SELECTED = "emblem-default-symbolic"
@@ -996,7 +1001,9 @@ class DirDiff(Gtk.Box, MeldDoc):
             if not any(os.path.isdir(root) for root in roots):
                 continue
 
-            yield _("Scanning {folder}").format(folder=roots[0][prefixlen:])
+            status = _("Scanning {folder}").format(folder=roots[0][prefixlen:])
+            yield status
+            slice_end = time.monotonic() + SCAN_SLICE_SECONDS
             differences = False
             encoding_errors = []
 
@@ -1020,6 +1027,10 @@ class DirDiff(Gtk.Box, MeldDoc):
                     entries = [e for e in entries if f.filter.match(e) is None]
 
                 for e in entries:
+                    if time.monotonic() > slice_end:
+                        yield status
+                        slice_end = time.monotonic() + SCAN_SLICE_SECONDS
+
                     try:
                         e.encode("utf8")
                     except UnicodeEncodeError:
@@ -1073,8 +1084,15 @@ class DirDiff(Gtk.Box, MeldDoc):
             for pane, f in dirs.whitespace + files.whitespace:
                 whitespace_filenames.append((pane, roots[pane], f))
 
-            alldirs = self._filter_on_state(roots, dirs.get())
-            allfiles = self._filter_on_state(roots, files.get())
+            # Filtering compares file contents, so it's done an entry at a
+            # time to keep each scan step short.
+            alldirs, allfiles = [], []
+            for listing, accepted in ((dirs, alldirs), (files, allfiles)):
+                for names in listing.get():
+                    if time.monotonic() > slice_end:
+                        yield status
+                        slice_end = time.monotonic() + SCAN_SLICE_SECONDS
+                    accepted.extend(self._filter_on_state(roots, [names]))
 
             if alldirs or allfiles:
                 for names in alldirs:
@@ -1083,6 +1101,9 @@ class DirDiff(Gtk.Box, MeldDoc):
                     differences |= self._update_item_state(child)
                     todo.append(self.model.get_path(child))
                 for names in allfiles:
+                    if time.monotonic() > slice_end:
+                        yield status
+                        slice_end = time.monotonic() + SCAN_SLICE_SECONDS
                     entries = [os.path.join(r, n) for r, n in zip(roots, names)]
                     child = self.model.add_entries(it, entries)
                     differences |= self._update_item_state(child)
