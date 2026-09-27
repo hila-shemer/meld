@@ -1,0 +1,17 @@
+#!/bin/sh
+# Run a command inside the meld-bench image, as the host user, under Xvfb.
+# The repo and ~/.cache/bld/meld (tmpfs, test trees and results) are
+# mounted at their host paths.
+set -e
+repo=$(cd "$(dirname "$0")/.." && pwd)
+bld=${MELD_BENCH_BLD:-$HOME/.cache/bld/meld}
+mkdir -p "$bld/home"
+exec docker run --rm -i --init --network none \
+    --user "$(id -u):$(id -g)" \
+    -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
+    -e HOME="$bld/home" -e LANG=C.UTF-8 -e NO_AT_BRIDGE=1 -e GTK_A11Y=none \
+    -e GSK_RENDERER="${GSK_RENDERER:-cairo}" -e GDK_BACKEND=x11 \
+    --cap-add SYS_PTRACE \
+    -v "$repo:$repo" -v "$bld:$bld" -w "$repo" \
+    meld-bench \
+    xvfb-run -a -s "-screen 0 1920x1200x24" dbus-run-session -- "$@"
