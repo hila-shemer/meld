@@ -95,6 +95,63 @@ class StatItem(namedtuple("StatItem", "mode size time")):
         return mtime1 == mtime2
 
 
+class StatCache:
+    """Remember stat results for the duration of one scan step
+
+    A folder scan looks at each file's stat from several places (listing,
+    filtering, comparing, row state), and on big trees the repeated
+    syscalls are a real part of the scan's cost. Missing files are
+    cached as None. Only meant to live for as long as one folder takes
+    to process, so staleness isn't a concern.
+    """
+
+    def __init__(self):
+        self.lstats = {}
+        self.stats = {}
+
+    def lstat(self, path):
+        try:
+            return self.lstats[path]
+        except KeyError:
+            pass
+        try:
+            result = os.lstat(path)
+        except OSError:
+            result = None
+        self.lstats[path] = result
+        return result
+
+    def stat(self, path):
+        try:
+            return self.stats[path]
+        except KeyError:
+            pass
+        lstat_result = self.lstats.get(path)
+        if lstat_result is not None and not stat.S_ISLNK(lstat_result.st_mode):
+            result = lstat_result
+        else:
+            try:
+                result = os.stat(path)
+            except OSError:
+                result = None
+        self.stats[path] = result
+        return result
+
+    def stat_or_raise(self, path):
+        result = self.stat(path)
+        if result is None:
+            # Match os.stat() for callers that expect it to raise
+            return os.stat(path)
+        return result
+
+    def exists(self, path):
+        return self.stat(path) is not None
+
+    def isdir(self, path):
+        result = self.stat(path)
+        return result is not None and stat.S_ISDIR(result.st_mode)
+
+
 CacheResult = namedtuple("CacheResult", "stats result")
 
 
@@ -168,7 +225,7 @@ def _normalize(contents, ignore_blank_lines, regexes=()):
     return contents
 
 
-def _files_same(files, regexes, comparison_args):
+def _files_same(files, regexes, comparison_args, stat_cache=None):
     """Determine whether a list of files are the same.
 
     Possible results are:
@@ -183,7 +240,8 @@ def _files_same(files, regexes, comparison_args):
         return Same
 
     files = tuple(files)
-    stats = tuple([StatItem._make(os.stat(f)) for f in files])
+    do_stat = stat_cache.stat_or_raise if stat_cache else os.stat
+    stats = tuple([StatItem._make(do_stat(f)) for f in files])
 
     shallow_comparison = comparison_args["shallow-comparison"]
     time_resolution_ns = comparison_args["time-resolution"]
@@ -1007,6 +1065,7 @@ class DirDiff(Gtk.Box, MeldDoc):
 
             dirs = CanonicalListing(self.num_panes, comparison_options)
             files = CanonicalListing(self.num_panes, comparison_options)
+            stat_cache = StatCache()
 
             for pane, root in enumerate(roots):
                 if not os.path.isdir(root):
@@ -1035,6 +1094,7 @@ class DirDiff(Gtk.Box, MeldDoc):
 
                     try:
                         s = os.lstat(os.path.join(root, e))
+                        stat_cache.lstats[os.path.join(root, e)] = s
                     # Covers certain unreadable symlink cases; see bgo#585895
                     except OSError as err:
                         error_string = e + err.strerror
@@ -1050,6 +1110,7 @@ class DirDiff(Gtk.Box, MeldDoc):
                         symlinks_followed.add(key)
                         try:
                             s = os.stat(os.path.join(root, e))
+                            stat_cache.stats[os.path.join(root, e)] = s
                             if stat.S_ISREG(s.st_mode):
                                 files.add(pane, e)
                             elif stat.S_ISDIR(s.st_mode):
@@ -1078,18 +1139,18 @@ class DirDiff(Gtk.Box, MeldDoc):
             for pane, f in dirs.whitespace + files.whitespace:
                 whitespace_filenames.append((pane, roots[pane], f))
 
-            alldirs = self._filter_on_state(roots, dirs.get())
-            allfiles = self._filter_on_state(roots, files.get())
+            alldirs = self._filter_on_state(roots, dirs.get(), stat_cache)
+            allfiles = self._filter_on_state(roots, files.get(), stat_cache)
 
             if alldirs or allfiles:
                 for names in alldirs:
                     entries = [os.path.join(r, n) for r, n in zip(roots, names)]
-                    child, different = self._add_item(it, entries)
+                    child, different = self._add_item(it, entries, stat_cache)
                     differences |= different
                     todo.append(self.model.get_path(child))
                 for names in allfiles:
                     entries = [os.path.join(r, n) for r, n in zip(roots, names)]
-                    child, different = self._add_item(it, entries)
+                    child, different = self._add_item(it, entries, stat_cache)
                     differences |= different
             else:
                 # Our subtree is empty, or has been filtered to be empty
@@ -1751,7 +1812,7 @@ class DirDiff(Gtk.Box, MeldDoc):
         # Filtering
         #
 
-    def _filter_on_state(self, roots, fileslist):
+    def _filter_on_state(self, roots, fileslist, stat_cache=None):
         """Get state of 'files' for filtering purposes.
         Returns STATE_NORMAL, STATE_NOCHANGE, STATE_NEW or STATE_MODIFIED
 
@@ -1760,11 +1821,14 @@ class DirDiff(Gtk.Box, MeldDoc):
         """
         ret = []
         regexes = [f.byte_filter for f in self.text_filters if f.active]
+        stat_cache = stat_cache or StatCache()
         for files in fileslist:
             curfiles = [os.path.join(r, f) for r, f in zip(roots, files)]
-            is_present = [os.path.exists(f) for f in curfiles]
+            is_present = [stat_cache.exists(f) for f in curfiles]
             if all(is_present):
-                comparison_result = self.file_compare(curfiles, regexes)
+                comparison_result = self.file_compare(
+                    curfiles, regexes, stat_cache=stat_cache
+                )
                 if comparison_result in (Same, DodgySame):
                     states = {tree.STATE_NORMAL}
                 elif comparison_result == SameFiltered:
@@ -1777,7 +1841,9 @@ class DirDiff(Gtk.Box, MeldDoc):
                 # pane 3. This row should be considered both modified (1 -> 2)
                 # and new (2 -> 3).
                 curfiles = [f for f, exists in zip(curfiles, is_present) if exists]
-                comparison_result = self.file_compare(curfiles, regexes)
+                comparison_result = self.file_compare(
+                    curfiles, regexes, stat_cache=stat_cache
+                )
                 if comparison_result in (Same, DodgySame, SameFiltered):
                     states = {tree.STATE_NEW}
                 else:
@@ -1786,7 +1852,7 @@ class DirDiff(Gtk.Box, MeldDoc):
                 states = {tree.STATE_NEW}
             # Always retain NORMAL folders for comparison; we remove these
             # later if they have no children.
-            all_folders = all(os.path.isdir(f) for f in curfiles)
+            all_folders = all(stat_cache.isdir(f) for f in curfiles)
             states_match_filters = bool(states & set(self.state_filters))
             if states_match_filters or all_folders:
                 ret.append(files)
@@ -1807,40 +1873,31 @@ class DirDiff(Gtk.Box, MeldDoc):
         self.model.set_values(it, values)
         return different
 
-    def _add_item(self, parent, files):
+    def _add_item(self, parent, files, stat_cache=None):
         """Add a row for `files` under `parent`, with its state already set
 
         Returns the new row and whether its files differ.
         """
-        values, different = self._item_state_values(files, is_root=False)
+        values, different = self._item_state_values(
+            files, is_root=False, stat_cache=stat_cache
+        )
         return self.model.add_entries(parent, files, values), different
 
-    def _item_state_values(self, files, is_root, it=None):
+    def _item_state_values(self, files, is_root, it=None, stat_cache=None):
         """Get the model values describing the state of `files`
 
         `it` is the existing row for the files, if there is one. Returns
         a {column: value} dict and whether the files differ.
         """
         regexes = [f.byte_filter for f in self.text_filters if f.active]
+        stat_cache = stat_cache or StatCache()
 
-        def none_stat(f):
-            try:
-                return os.stat(f)
-            except OSError:
-                return None
-
-        stats = [none_stat(f) for f in files[: self.num_panes]]
+        stats = [stat_cache.stat(f) for f in files[: self.num_panes]]
         sizes = [s.st_size if s else 0 for s in stats]
         perms = [s.st_mode if s else 0 for s in stats]
         times = [s.st_mtime if s else 0 for s in stats]
 
-        def none_lstat(f):
-            try:
-                return os.lstat(f)
-            except OSError:
-                return None
-
-        lstats = [none_lstat(f) for f in files[: self.num_panes]]
+        lstats = [stat_cache.lstat(f) for f in files[: self.num_panes]]
         symlinks = {i for i, s in enumerate(lstats) if s and stat.S_ISLNK(s.st_mode)}
 
         def name_override(i: int, file: str) -> str | None:
@@ -1865,12 +1922,12 @@ class DirDiff(Gtk.Box, MeldDoc):
             newest = {i for i, t in enumerate(times) if t == newest_time}
 
         if all(stats):
-            all_same = self.file_compare(files, regexes)
+            all_same = self.file_compare(files, regexes, stat_cache=stat_cache)
             all_present_same = all_same
         else:
             lof = [f for f, time in zip(files, times) if time]
             all_same = Different
-            all_present_same = self.file_compare(lof, regexes)
+            all_present_same = self.file_compare(lof, regexes, stat_cache=stat_cache)
 
         # TODO: Differentiate the DodgySame case
         if all_same == Same or all_same == DodgySame:
@@ -1887,7 +1944,7 @@ class DirDiff(Gtk.Box, MeldDoc):
             state = tree.STATE_MODIFIED
         different = state not in {tree.STATE_NORMAL, tree.STATE_NOCHANGE}
 
-        isdir = [os.path.isdir(files[j]) for j in range(self.model.ntree)]
+        isdir = [stat_cache.isdir(files[j]) for j in range(self.model.ntree)]
         # All panes' values are collected and set in one go, since every
         # separate model update is handled by every tree view.
         values = {}
