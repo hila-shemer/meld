@@ -172,6 +172,7 @@ class Bench:
         result.update(self.monitor.summary(mark))
         if self.args.verify:
             result["expanded"] = expanded_rows(self.doc)
+            result["chunkmap"] = chunkmap_digests(self.doc)
         self.results[name] = result
         print(f"  {name:12} {json.dumps(result)}", file=sys.stderr, flush=True)
 
@@ -346,6 +347,18 @@ def expanded_rows(doc):
         doc.model.foreach(check)
         counts.append(count)
     return counts
+
+
+def chunkmap_digests(doc):
+    """Digest each pane's chunk map coordinates, for --verify"""
+    import hashlib
+
+    return [
+        hashlib.sha1(
+            repr(sorted(m.chunk_coords_by_tag().items())).encode()
+        ).hexdigest()[:12]
+        for m in doc.chunkmap[: doc.num_panes]
+    ]
 
 
 def count_rows(model):
