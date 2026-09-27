@@ -162,8 +162,9 @@ class DiffTreeStore(SearchableTreeStore):
     def column_index(self, col, pane):
         return self.ntree * col + pane
 
-    def add_entries(self, parent, names):
-        values = {}
+    def add_entries(self, parent, names, values=None):
+        """Add a row for the paths `names`, plus any other column `values`"""
+        values = dict(values or {})
         for pane, path in enumerate(names):
             values.update(self.column_values(pane, {COL_PATH: path}))
         if _GIGtk:

@@ -1084,13 +1084,13 @@ class DirDiff(Gtk.Box, MeldDoc):
             if alldirs or allfiles:
                 for names in alldirs:
                     entries = [os.path.join(r, n) for r, n in zip(roots, names)]
-                    child = self.model.add_entries(it, entries)
-                    differences |= self._update_item_state(child)
+                    child, different = self._add_item(it, entries)
+                    differences |= different
                     todo.append(self.model.get_path(child))
                 for names in allfiles:
                     entries = [os.path.join(r, n) for r, n in zip(roots, names)]
-                    child = self.model.add_entries(it, entries)
-                    differences |= self._update_item_state(child)
+                    child, different = self._add_item(it, entries)
+                    differences |= different
             else:
                 # Our subtree is empty, or has been filtered to be empty
                 if tree.STATE_NORMAL in self.state_filters or not all(
@@ -1797,10 +1797,30 @@ class DirDiff(Gtk.Box, MeldDoc):
 
         All changes and updates to tree rows should happen here;
         structural changes happen elsewhere, but they only delete rows
-        or add new rows with path information. This function is the
-        only place where row details are changed.
+        or add new rows with path information. This function (via
+        `_item_state_values()`) is the only place where row details
+        are decided.
         """
-        files = self.model.value_paths(it)
+        values, different = self._item_state_values(
+            self.model.value_paths(it), self.model.iter_is_root(it), it
+        )
+        self.model.set_values(it, values)
+        return different
+
+    def _add_item(self, parent, files):
+        """Add a row for `files` under `parent`, with its state already set
+
+        Returns the new row and whether its files differ.
+        """
+        values, different = self._item_state_values(files, is_root=False)
+        return self.model.add_entries(parent, files, values), different
+
+    def _item_state_values(self, files, is_root, it=None):
+        """Get the model values describing the state of `files`
+
+        `it` is the existing row for the files, if there is one. Returns
+        a {column: value} dict and whether the files differ.
+        """
         regexes = [f.byte_filter for f in self.text_filters if f.active]
 
         def none_stat(f):
@@ -1822,8 +1842,6 @@ class DirDiff(Gtk.Box, MeldDoc):
 
         lstats = [none_lstat(f) for f in files[: self.num_panes]]
         symlinks = {i for i, s in enumerate(lstats) if s and stat.S_ISLNK(s.st_mode)}
-
-        is_root = self.model.iter_is_root(it)
 
         def name_override(i: int, file: str) -> str | None:
             if i in symlinks:
@@ -1874,14 +1892,13 @@ class DirDiff(Gtk.Box, MeldDoc):
         # separate model update is handled by every tree view.
         values = {}
         for j in range(self.model.ntree):
+            display_text = name_overrides[j] or GLib.markup_escape_text(
+                os.path.basename(files[j])
+            )
             if stats[j]:
-                values.update(
-                    self.model.path_state_values(
-                        it, j, state, isdir[j], display_text=name_overrides[j]
-                    )
-                )
+                values.update(self.model.state_values(j, state, display_text, isdir[j]))
 
-                if self.marked and self.marked.matches_iter(j, it):
+                if self.marked and it and self.marked.matches_iter(j, it):
                     emblem = EMBLEM_SELECTED
                 else:
                     emblem = EMBLEM_NEW if j in newest else None
@@ -1899,7 +1916,9 @@ class DirDiff(Gtk.Box, MeldDoc):
                 values.update(self.model.column_values(j, pane_values))
             else:
                 values.update(
-                    self.model.path_state_values(it, j, tree.STATE_NONEXIST, any(isdir))
+                    self.model.state_values(
+                        j, tree.STATE_NONEXIST, display_text, any(isdir)
+                    )
                 )
                 # Set sentinel values for time, size and perms
                 # TODO: change sentinels to float('nan'), pending:
@@ -1910,8 +1929,7 @@ class DirDiff(Gtk.Box, MeldDoc):
                         {COL_TIME: MISSING_TIMESTAMP, COL_SIZE: -1, COL_PERMS: -1},
                     )
                 )
-        self.model.set_values(it, values)
-        return different
+        return values, different
 
     def set_num_panes(self, num_panes):
         if num_panes == self.num_panes or num_panes not in (1, 2, 3):
