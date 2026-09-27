@@ -394,15 +394,24 @@ class TreeViewChunkMap(ChunkMap):
         self._cached_map = None
 
     def chunk_coords_by_tag(self):
-        def recurse_tree_states(rowiter):
-            row_states.append(model.get_state(rowiter.iter, self.treeview_idx))
-            if self.treeview.row_expanded(rowiter.path):
-                for row in rowiter.iterchildren():
-                    recurse_tree_states(row)
+        # This visits every row the view shows, so it walks raw iterators
+        # and only asks the view about rows that have children; building
+        # TreeModelRow objects per row made this a multi-second stall on
+        # big expanded trees.
+        def recurse_tree_states(it):
+            row_states.append(model.get_state(it, pane))
+            if model.iter_has_child(it) and self.treeview.row_expanded(
+                model.get_path(it)
+            ):
+                child = model.iter_children(it)
+                while child is not None:
+                    recurse_tree_states(child)
+                    child = model.iter_next(child)
 
         row_states = []
         model = self.treeview.get_model()
-        recurse_tree_states(next(iter(model)))
+        pane = self.treeview_idx
+        recurse_tree_states(model.get_iter_first())
         # Terminating mark to force the last chunk to be added
         row_states.append(None)
 
