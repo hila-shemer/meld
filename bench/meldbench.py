@@ -173,6 +173,7 @@ class Bench:
         if self.args.verify:
             result["expanded"] = expanded_rows(self.doc)
             result["chunkmap"] = chunkmap_digests(self.doc)
+            result["model"] = model_digest(self.doc.model)
         self.results[name] = result
         print(f"  {name:12} {json.dumps(result)}", file=sys.stderr, flush=True)
 
@@ -359,6 +360,20 @@ def chunkmap_digests(doc):
         ).hexdigest()[:12]
         for m in doc.chunkmap[: doc.num_panes]
     ]
+
+
+def model_digest(model):
+    """Digest every cell of the model, for --verify"""
+    import hashlib
+
+    digest = hashlib.sha1()
+
+    def add(model, path, it):
+        cells = [model.get_value(it, col) for col in range(model.get_n_columns())]
+        digest.update(repr((path.to_string(), cells)).encode())
+
+    model.foreach(add)
+    return digest.hexdigest()[:12]
 
 
 def count_rows(model):
