@@ -163,9 +163,17 @@ class DiffTreeStore(SearchableTreeStore):
         return self.ntree * col + pane
 
     def add_entries(self, parent, names):
-        it = self.append(parent)
+        values = {}
         for pane, path in enumerate(names):
-            self.unsafe_set(it, pane, {COL_PATH: path})
+            values.update(self.column_values(pane, {COL_PATH: path}))
+        if _GIGtk:
+            # Setting the values as part of the insert means views see one
+            # row-inserted, rather than a row-inserted and a row-changed.
+            return _GIGtk.TreeStore.insert_with_values(
+                self, parent, -1, list(values), list(values.values())
+            )
+        it = self.append(parent)
+        self.set_values(it, values)
         return it
 
     def add_empty(self, parent, text="empty folder"):
@@ -185,17 +193,24 @@ class DiffTreeStore(SearchableTreeStore):
         self.set_state(it, pane, STATE_ERROR, msg)
 
     def set_path_state(self, it, pane, state, isdir=0, display_text=None):
+        self.set_values(
+            it, self.path_state_values(it, pane, state, isdir, display_text)
+        )
+
+    def path_state_values(self, it, pane, state, isdir=0, display_text=None):
         if not display_text:
             fullname = self.get_value(it, self.column_index(COL_PATH, pane))
             display_text = GLib.markup_escape_text(os.path.basename(fullname))
-        self.set_state(it, pane, state, display_text, isdir)
+        return self.state_values(pane, state, display_text, isdir)
 
     def set_state(self, it, pane, state, label, isdir=0):
+        self.set_values(it, self.state_values(pane, state, label, isdir))
+
+    def state_values(self, pane, state, label, isdir=0):
         icon = self.icon_details[state][1 if isdir else 0]
         tint = None if isdir else self.icon_details[state][2]
         fg, style, weight, strike = self.text_attributes[state]
-        self.unsafe_set(
-            it,
+        return self.column_values(
             pane,
             {
                 COL_STATE: str(state),
@@ -301,18 +316,31 @@ class DiffTreeStore(SearchableTreeStore):
 
         return None
         """
-        safe_keys_values = {
+        self.set_values(treeiter, self.column_values(pane, keys_values))
+
+    def column_values(self, pane, keys_values):
+        """Map a pane's {column: value} to {model column index: value}
+
+        The result can be merged with other panes' values and applied
+        with a single `set_values()` call.
+        """
+        return {
             self.column_index(col, pane): val
             if val is not None
             else self._none_of_cols.get(self.column_index(col, pane))
             for col, val in keys_values.items()
         }
+
+    def set_values(self, treeiter, values):
+        """Set {model column index: value} with a single row update
+
+        Every separate set emits row-changed, which each attached view
+        handles, so rows should be updated in as few calls as possible.
+        """
         if _GIGtk and treeiter:
-            columns = [col for col in safe_keys_values]
-            values = [val for val in safe_keys_values.values()]
-            _GIGtk.TreeStore.set(self, treeiter, columns, values)
+            _GIGtk.TreeStore.set(self, treeiter, list(values), list(values.values()))
         else:
-            self.set(treeiter, safe_keys_values)
+            self.set(treeiter, values)
 
 
 class MeldTreeView(Gtk.TreeView):

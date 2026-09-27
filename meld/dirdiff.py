@@ -928,23 +928,28 @@ class DirDiff(Gtk.Box, MeldDoc):
         called on the row to restore its actual state.
         """
 
+        values = {}
         for pane in range(self.model.ntree):
             folder_name = self.model.get_value(
                 it, self.model.column_index(tree.COL_TEXT, pane)
             )
             label = _("{folder_name} (scanning…)").format(folder_name=folder_name)
 
-            self.model.set_state(it, pane, tree.STATE_SPINNER, label, True)
-            self.model.unsafe_set(
-                it,
-                pane,
-                {
-                    COL_EMBLEM: None,
-                    COL_TIME: MISSING_TIMESTAMP,
-                    COL_SIZE: -1,
-                    COL_PERMS: -1,
-                },
+            values.update(
+                self.model.state_values(pane, tree.STATE_SPINNER, label, True)
             )
+            values.update(
+                self.model.column_values(
+                    pane,
+                    {
+                        COL_EMBLEM: None,
+                        COL_TIME: MISSING_TIMESTAMP,
+                        COL_SIZE: -1,
+                        COL_PERMS: -1,
+                    },
+                )
+            )
+        self.model.set_values(it, values)
 
     def recursively_update(self, path):
         """Recursively update from tree path 'path'."""
@@ -1865,10 +1870,15 @@ class DirDiff(Gtk.Box, MeldDoc):
         different = state not in {tree.STATE_NORMAL, tree.STATE_NOCHANGE}
 
         isdir = [os.path.isdir(files[j]) for j in range(self.model.ntree)]
+        # All panes' values are collected and set in one go, since every
+        # separate model update is handled by every tree view.
+        values = {}
         for j in range(self.model.ntree):
             if stats[j]:
-                self.model.set_path_state(
-                    it, j, state, isdir[j], display_text=name_overrides[j]
+                values.update(
+                    self.model.path_state_values(
+                        it, j, state, isdir[j], display_text=name_overrides[j]
+                    )
                 )
 
                 if self.marked and self.marked.matches_iter(j, it):
@@ -1876,28 +1886,31 @@ class DirDiff(Gtk.Box, MeldDoc):
                 else:
                     emblem = EMBLEM_NEW if j in newest else None
 
-                self.model.unsafe_set(
-                    it, j, {COL_EMBLEM: emblem, COL_TIME: times[j], COL_PERMS: perms[j]}
-                )
+                pane_values = {
+                    COL_EMBLEM: emblem,
+                    COL_TIME: times[j],
+                    COL_PERMS: perms[j],
+                    # An explicit GValue, because a bare int can't be
+                    # correctly boxed as a GObject.TYPE_INT64.
+                    COL_SIZE: GObject.Value(GObject.TYPE_INT64, sizes[j]),
+                }
                 if j in symlinks:
-                    self.model.unsafe_set(
-                        it,
-                        j,
-                        {
-                            tree.COL_ICON: "symbolic-link-symbolic",
-                        },
-                    )
-                # Size is handled independently, because unsafe_set
-                # can't correctly box GObject.TYPE_INT64.
-                self.model.set(it, self.model.column_index(COL_SIZE, j), sizes[j])
+                    pane_values[tree.COL_ICON] = "symbolic-link-symbolic"
+                values.update(self.model.column_values(j, pane_values))
             else:
-                self.model.set_path_state(it, j, tree.STATE_NONEXIST, any(isdir))
+                values.update(
+                    self.model.path_state_values(it, j, tree.STATE_NONEXIST, any(isdir))
+                )
                 # Set sentinel values for time, size and perms
                 # TODO: change sentinels to float('nan'), pending:
                 #   https://gitlab.gnome.org/GNOME/glib/issues/183
-                self.model.unsafe_set(
-                    it, j, {COL_TIME: MISSING_TIMESTAMP, COL_SIZE: -1, COL_PERMS: -1}
+                values.update(
+                    self.model.column_values(
+                        j,
+                        {COL_TIME: MISSING_TIMESTAMP, COL_SIZE: -1, COL_PERMS: -1},
+                    )
                 )
+        self.model.set_values(it, values)
         return different
 
     def set_num_panes(self, num_panes):
