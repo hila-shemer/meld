@@ -25,8 +25,12 @@ def main():
         for line in f:
             stack, _, count = line.rstrip().rpartition(" ")
             frames = stack.split(";")
-            if args.under and not any(args.under in fr for fr in frames):
-                continue
+            if args.under:
+                hits = [i for i, fr in enumerate(frames) if args.under in fr]
+                if not hits:
+                    continue
+                # Only what runs below the outermost matching frame
+                frames = frames[hits[0] :]
             n = int(count)
             total += n
             for frame in set(frames):

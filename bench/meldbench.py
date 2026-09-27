@@ -170,6 +170,8 @@ class Bench:
         result = {"ms": round(elapsed * 1000, 1)}
         result.update(extra)
         result.update(self.monitor.summary(mark))
+        if self.args.verify:
+            result["expanded"] = expanded_rows(self.doc)
         self.results[name] = result
         print(f"  {name:12} {json.dumps(result)}", file=sys.stderr, flush=True)
 
@@ -233,6 +235,14 @@ class Bench:
                 self.doc.action_folder_collapse()
                 yield self.next_paint()
                 self.record("collapse_all", t0, mark)
+                if self.args.verify:
+                    # Expansions below a collapsed folder must not come back
+                    tv.expand_row(root, False)
+                    yield self.next_paint()
+                    self.results["collapse_all"]["root_reopened"] = expanded_rows(
+                        self.doc
+                    )
+                    tv.collapse_row(root)
                 tv.set_cursor(root)
                 mark, t0 = self.monitor.mark(), time.perf_counter()
                 self.doc.action_folder_expand()
@@ -323,6 +333,21 @@ class Bench:
             self.first_row_time = time.perf_counter()
 
 
+def expanded_rows(doc):
+    """Count the expanded rows in each pane's view, for --verify"""
+    counts = []
+    for view in doc.treeview[: doc.num_panes]:
+        count = 0
+
+        def check(model, path, it, view=view):
+            nonlocal count
+            count += view.row_expanded(path)
+
+        doc.model.foreach(check)
+        counts.append(count)
+    return counts
+
+
 def count_rows(model):
     count = 0
 
@@ -345,6 +370,11 @@ def main():
     parser.add_argument("--moves", type=int, default=100, help="scroll/cursor moves")
     parser.add_argument("--touch", help="file to append to before the rescan step")
     parser.add_argument("--out", help="write results as JSON to this file")
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="record per-view expanded row counts, to check behaviour (slow)",
+    )
     parser.add_argument("--label", default="", help="free-form label for the JSON")
     parser.add_argument(
         "--source",
