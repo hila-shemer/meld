@@ -1554,10 +1554,14 @@ class DirDiff(Gtk.Box, MeldDoc):
 
     @Gtk.Template.Callback()
     def on_treeview_row_expanded(self, view, it, path):
-        self.row_expansions.add(str(path))
-        for row in self.model[path].iterchildren():
-            if str(row.path) in self.row_expansions:
-                view.expand_row(row.path, False)
+        path_str = str(path)
+        self.row_expansions.add(path_str)
+        # This runs for every folder in an expand-all, so child paths are
+        # formatted rather than fetched from the model.
+        for i in range(self.model.iter_n_children(it)):
+            child_str = f"{path_str}:{i}"
+            if child_str in self.row_expansions:
+                view.expand_row(Gtk.TreePath.new_from_string(child_str), False)
 
         self._do_to_others(view, self.treeview, "expand_row", (path, False))
 
@@ -1648,21 +1652,13 @@ class DirDiff(Gtk.Box, MeldDoc):
             return
 
         root_path = self._get_selected_paths(pane)[0]
-        filter_model = Gtk.TreeModelFilter(
-            child_model=self.model, virtual_root=root_path
-        )
-        paths_to_collapse = []
-        filter_model.foreach(self.append_paths_to_collapse, paths_to_collapse)
-        paths_to_collapse.insert(0, root_path)
-
-        for path in reversed(paths_to_collapse):
-            self.treeview[pane].collapse_row(path)
-
-    def append_paths_to_collapse(
-        self, filter_model, filter_path, filter_iter, paths_to_collapse
-    ):
-        path = filter_model.convert_path_to_child_path(filter_path)
-        paths_to_collapse.append(path)
+        # Collapsing a row already drops its descendants' expansion from the
+        # views; what's left is to stop them being restored on re-expand.
+        prefix = f"{root_path}:"
+        self.row_expansions = {
+            p for p in self.row_expansions if not p.startswith(prefix)
+        }
+        self.treeview[pane].collapse_row(root_path)
 
     def action_folder_expand(self, *args):
         pane = self._get_focused_pane()
